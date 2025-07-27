@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8" />
+  <title>Secure Image Vault</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+  <style>
+   body {
+  font-family: sans-serif;
+  margin: 0;
+  background: #f9f9f9;
+}
+
+nav {
+  display: flex;
+  background: white;
+  border-bottom: 1px solid #ccc;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  padding: 12px;
+  gap: 10px;
+}
+
+nav button {
+  background: #eee;
+  border: none;
+  padding: 10px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+nav button:hover {
+  background: #ddd;
+}
+
+#unlockUI, .page {
+  max-width: 800px;
+  margin: auto;
+  padding: 20px;
+}
+
+input, button {
+  width: 100%;
+  padding: 10px;
+  margin: 12px 0;
+  font-size: 16px;
+  box-sizing: border-box;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.thumb img {
+  width: 100%;
+  border-radius: 4px;
+  cursor: pointer;
+  object-fit: cover;
+  height: 120px;
+  transition: transform 0.2s ease;
+}
+
+.thumb img:hover {
+  transform: scale(1.05);
+}
+
+/* Zoomed Image */
+#lightbox {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(0, 0, 0, 0.85);
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  color: white;
+  padding: 20px;
+  box-sizing: border-box;
+}
+
+#lightboxImg {
+  max-width: 90%;
+  max-height: 70vh;
+  border-radius: 8px;
+  margin-bottom: 15px;
+  user-select: none;
+}
+
+/* Controls below zoomed image */
+#lightboxControls {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.nav-arrow {
+  font-size: 3rem;
+  cursor: pointer;
+  user-select: none;
+  padding: 5px 15px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 5px;
+  transition: background 0.2s;
+  line-height: 1;
+}
+
+.nav-arrow:hover {
+  background: rgba(255,255,255,0.4);
+}
+
+#deleteButton {
+  background: #ff4d4d;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background 0.3s;
+  color: white;
+}
+
+#deleteButton:hover {
+  background: #ff1a1a;
+}
+
+/* MOBILE STYLES */
+@media (max-width: 600px) {
+  nav {
+    flex-direction: column;
+    gap: 6px;
+  }
+  
+  .grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+  
+  .thumb img {
+    height: 140px;
+  }
+  
+  #lightboxImg {
+    max-width: 95%;
+    max-height: 60vh;
+  }
+  
+  .nav-arrow {
+    font-size: 2.5rem;
+    padding: 5px 12px;
+  }
+  
+  #deleteButton {
+    padding: 12px 16px;
+    font-size: 16px;
+  }
+}
+
+  </style>
+</head>
+<body>
+
+<!-- NAVIGATION -->
+<nav id="navbar" style="display: none;">
+  <button onclick="switchPage('vaultPage')">View Images</button>
+  <button onclick="switchPage('changePage')">Change Password</button>
+  <button onclick="downloadVault()">Save</button>
+</nav>
+
+<!-- UNLOCK UI -->
+<div id="unlockUI">
+  <h2>Unlock Vault</h2>
+  <input type="file" id="fileInput" accept=".romimages" />
+  <input type="password" id="passwordInput" placeholder="Master password" />
+  <button onclick="unlockVault()">Unlock</button>
+</div>
+
+<!-- IMAGE VAULT PAGE -->
+<div class="page" id="vaultPage" style="display: none;">
+  <h2>Your Images</h2>
+  <!-- Allow multiple image selection -->
+  <input type="file" accept="image/*" multiple onchange="handleImageUpload(event)" />
+  <div class="grid" id="imageGrid"></div>
+</div>
+
+<!-- CHANGE PASSWORD PAGE -->
+<div class="page" id="changePage" style="display: none;">
+  <h2>Change Master Password</h2>
+  <input type="password" id="oldPass" placeholder="Current password" />
+  <input type="password" id="newPass" placeholder="New password" />
+  <input type="password" id="confirmPass" placeholder="Confirm new password" />
+  <button onclick="changeMasterPassword()">Change Password</button>
+</div>
+
+<!-- LIGHTBOX / FULL IMAGE VIEW -->
+<div id="lightbox" onclick="closeLightbox(event)">
+  <img id="lightboxImg" src="" draggable="false" />
+  <div id="lightboxControls">
+    <div class="nav-arrow" id="prevArrow" onclick="navigateLightbox(-1)">&#8592;</div>
+    <button id="deleteButton" onclick="deleteCurrentImage()">Delete</button>
+    <div class="nav-arrow" id="nextArrow" onclick="navigateLightbox(1)">&#8594;</div>
+  </div>
+</div>
+
+<script>
+let currentMaster = '';
+let derivedKey = null;
+let hmacKey = null;
+let images = [];
+let currentIndex = 0;
+
+const PBKDF2_ITERATIONS = 100000;
+
+function generateSalt(length = 16) {
+  return CryptoJS.lib.WordArray.random(length).toString(CryptoJS.enc.Hex);
+}
+
+function generateIV() {
+  return CryptoJS.lib.WordArray.random(16);
+}
+
+function deriveKeys(password, saltHex) {
+  const salt = CryptoJS.enc.Hex.parse(saltHex);
+  const fullKey = CryptoJS.PBKDF2(password, salt, { keySize: 512 / 32, iterations: PBKDF2_ITERATIONS });
+  return {
+    aesKey: CryptoJS.lib.WordArray.create(fullKey.words.slice(0, 8)),
+    hmacKey: CryptoJS.lib.WordArray.create(fullKey.words.slice(8, 16))
+  };
+}
+
+function encryptDataURI(dataURI, key) {
+  const iv = generateIV();
+  const encrypted = CryptoJS.AES.encrypt(dataURI, key, { iv });
+  return {
+    ct: encrypted.toString(),
+    iv: iv.toString(CryptoJS.enc.Hex)
+  };
+}
+
+function decryptDataURI(cipherObj, key) {
+  try {
+    const iv = CryptoJS.enc.Hex.parse(cipherObj.iv);
+    const decrypted = CryptoJS.AES.decrypt(cipherObj.ct, key, { iv });
+    return decrypted.toString(CryptoJS.enc.Utf8);
+  } catch {
+    return '';
+  }
+}
+
+function computeHMAC(data, key) {
+  return CryptoJS.HmacSHA256(data, key).toString(CryptoJS.enc.Hex);
+}
+
+function unlockVault() {
+  const file = document.getElementById('fileInput').files[0];
+  const password = document.getElementById('passwordInput').value;
+  if (!file || !password) return alert("Upload file and enter password.");
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const vault = JSON.parse(e.target.result);
+      const { aesKey, hmacKey: hk } = deriveKeys(password, vault.salt);
+      const hmacCheck = computeHMAC(JSON.stringify(vault.images), hk);
+      if (hmacCheck !== vault.hmac) throw "HMAC mismatch";
+      currentMaster = password;
+      derivedKey = aesKey;
+      hmacKey = hk;
+      images = vault.images;
+      document.getElementById('unlockUI').style.display = 'none';
+      document.getElementById('navbar').style.display = 'flex';
+      switchPage('vaultPage');
+    } catch (err) {
+      alert("Failed to unlock vault.");
+    }
+  };
+  reader.readAsText(file);
+}
+
+function switchPage(id) {
+  document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+  document.getElementById(id).style.display = 'block';
+  if (id === 'vaultPage') displayImages();
+}
+
+function displayImages() {
+  const grid = document.getElementById('imageGrid');
+  grid.innerHTML = '';
+  images.forEach((img, i) => {
+    const dataURL = decryptDataURI(img, derivedKey);
+    if (!dataURL) return;
+    const div = document.createElement('div');
+    div.className = 'thumb';
+    div.innerHTML = `<img src="${dataURL}" onclick="openLightbox(${i})" />`;
+    grid.appendChild(div);
+  });
+}
+
+function handleImageUpload(event) {
+  const files = Array.from(event.target.files);
+  if (!files.length || !derivedKey) return;
+
+  let processedCount = 0;
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      const dataURL = e.target.result;
+      const encrypted = encryptDataURI(dataURL, derivedKey);
+      images.push(encrypted);
+      processedCount++;
+      if (processedCount === files.length) {
+        displayImages();
+      }
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function downloadVault() {
+  const salt = generateSalt();
+  const { aesKey, hmacKey: hk } = deriveKeys(currentMaster, salt);
+  const reEncrypted = images.map(img => {
+    const decrypted = decryptDataURI(img, derivedKey);
+    return encryptDataURI(decrypted, aesKey);
+  });
+  const hmac = computeHMAC(JSON.stringify(reEncrypted), hk);
+  const blob = new Blob([JSON.stringify({ salt, images: reEncrypted, hmac })], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'myvault.romimages';
+  a.click();
+}
+
+function openLightbox(index) {
+  currentIndex = index;
+  showCurrentLightboxImage();
+  document.getElementById('lightbox').style.display = 'flex';
+}
+
+function showCurrentLightboxImage() {
+  if (images.length === 0) {
+    closeLightbox();
+    return;
+  }
+  if (currentIndex < 0) currentIndex = images.length - 1;
+  if (currentIndex >= images.length) currentIndex = 0;
+
+  const img = decryptDataURI(images[currentIndex], derivedKey);
+  if (img) {
+    document.getElementById('lightboxImg').src = img;
+  } else {
+    // If decryption failed for some reason, remove that image
+    images.splice(currentIndex, 1);
+    if (images.length === 0) {
+      closeLightbox();
+      return;
+    }
+    if (currentIndex >= images.length) currentIndex = 0;
+    showCurrentLightboxImage();
+  }
+}
+
+function closeLightbox(event) {
+  // Prevent closing if clicking on arrows or delete button
+  if (event && (event.target.id === 'prevArrow' || event.target.id === 'nextArrow' || event.target.id === 'deleteButton' || event.target.id === 'lightboxImg')) {
+    return;
+  }
+  document.getElementById('lightbox').style.display = 'none';
+}
+
+// Navigate images via arrows or buttons
+function navigateLightbox(direction) {
+  currentIndex += direction;
+  if (currentIndex < 0) currentIndex = images.length - 1;
+  if (currentIndex >= images.length) currentIndex = 0;
+  showCurrentLightboxImage();
+}
+
+// Delete current image from vault
+function deleteCurrentImage() {
+  if (images.length === 0) return;
+  if (!confirm("Delete this image?")) return;
+  images.splice(currentIndex, 1);
+  if (images.length === 0) {
+    closeLightbox();
+  } else {
+    if (currentIndex >= images.length) currentIndex = 0;
+    showCurrentLightboxImage();
+    displayImages();
+  }
+}
+
+// Keyboard navigation for lightbox
+window.addEventListener('keydown', e => {
+  if (document.getElementById('lightbox').style.display !== 'flex') return;
+
+  if (e.key === 'ArrowLeft') {
+    navigateLightbox(-1);
+  } else if (e.key === 'ArrowRight') {
+    navigateLightbox(1);
+  } else if (e.key === 'Escape') {
+    closeLightbox();
+  }
+});
+
+window.addEventListener('touchstart', handleTouchStart, false);
+window.addEventListener('touchend', handleTouchEnd, false);
+let xDown = null;
+
+function handleTouchStart(evt) {
+  xDown = evt.touches[0].clientX;
+}
+
+function handleTouchEnd(evt) {
+  if (!xDown || document.getElementById('lightbox').style.display !== 'flex') return;
+
+  const xUp = evt.changedTouches[0].clientX;
+  const diff = xDown - xUp;
+  if (Math.abs(diff) < 50) return;
+
+  if (diff > 0) currentIndex++; // swipe left
+  else currentIndex--;          // swipe right
+
+  if (currentIndex < 0) currentIndex = images.length - 1;
+  if (currentIndex >= images.length) currentIndex = 0;
+
+  showCurrentLightboxImage();
+  xDown = null;
+}
+
+function changeMasterPassword() {
+  const oldPass = document.getElementById('oldPass').value;
+  const newPass = document.getElementById('newPass').value;
+  const confirmPass = document.getElementById('confirmPass').value;
+
+  if (!oldPass || !newPass || !confirmPass) {
+    alert("Fill all fields.");
+    return;
+  }
+  if (newPass !== confirmPass) {
+    alert("New passwords do not match.");
+    return;
+  }
+  if (oldPass !== currentMaster) {
+    alert("Incorrect current password.");
+    return;
+  }
+
+  const salt = generateSalt();
+  const { aesKey: newAesKey, hmacKey: newHmacKey } = deriveKeys(newPass, salt);
+  const reEncrypted = images.map(img => {
+    const decrypted = decryptDataURI(img, derivedKey);
+    return encryptDataURI(decrypted, newAesKey);
+  });
+
+  currentMaster = newPass;
+  derivedKey = newAesKey;
+  hmacKey = newHmacKey;
+  images = reEncrypted;
+
+  alert("Password changed!");
+  document.getElementById('oldPass').value = '';
+  document.getElementById('newPass').value = '';
+  document.getElementById('confirmPass').value = '';
+  switchPage('vaultPage');
+}
+</script>
+
+</body>
+</html>
